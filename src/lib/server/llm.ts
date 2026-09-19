@@ -172,11 +172,17 @@ function stripEcho(completion: string, prefix: string): string {
 	const c = completion.toLowerCase();
 	const p = prefix.trimEnd().toLowerCase();
 	// Try progressively shorter tails of the prompt as candidate echoes.
+	// Require a word boundary at the echo start: a genuine echo repeats whole
+	// words ("...discovered in June"), while a completion that merely begins
+	// with a shared substring ("iscovered…") must not be truncated.
 	const max = Math.min(p.length, c.length);
 	for (let k = max; k >= 4; k--) {
 		const tail = p.slice(-k);
 		if (c.startsWith(tail)) {
-			return completion.slice(k).replace(/^[\s,;:]+/, '');
+			const atWordBoundary = k === p.length || /\s/.test(p[p.length - k - 1] ?? '');
+			if (atWordBoundary) {
+				return completion.slice(k).replace(/^[\s,;:]+/, '');
+			}
 		}
 	}
 	return completion;

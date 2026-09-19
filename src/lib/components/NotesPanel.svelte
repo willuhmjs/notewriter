@@ -5,7 +5,7 @@
 	import type { NoteChunk } from '$lib/types';
 
 	let {
-		notes = '',
+		notes = $bindable(''),
 		onNotesChange
 	}: {
 		notes: string;
@@ -19,20 +19,21 @@
 	const CHUNK_DEBOUNCE = 1000;
 	let debounceTimer: ReturnType<typeof setTimeout>;
 
-	/** Debounced chunking — the "index build" — plus a preview of chunks. */
-	function handleInput() {
+	/** Input handler: propagate up (persist + reindex) and refresh the chunk count. */
+	function handleInput(e: Event) {
+		const v = (e.currentTarget as HTMLTextAreaElement).value;
+		onNotesChange(v);
 		clearTimeout(debounceTimer);
 		debounceTimer = setTimeout(() => {
-			chunkCount = chunkNotes(notes).length;
+			chunkCount = chunkNotes(v).length;
 		}, CHUNK_DEBOUNCE);
 	}
 
 	async function importFile(f: File) {
 		const text = await f.text();
-		onNotesChange(notes ? `${notes}\n\n${text}` : text);
-		await tick();
-		chunkCount = chunkNotes(notes).length;
-		handleInput();
+		const merged = notes ? `${notes}\n\n${text}` : text;
+		onNotesChange(merged);
+		chunkCount = chunkNotes(merged).length;
 	}
 
 	function onFilePick(e: Event) {
@@ -82,7 +83,7 @@
 	</header>
 	<textarea
 		bind:this={textarea}
-		bind:value={notes}
+		value={notes}
 		oninput={handleInput}
 		spellcheck="false"
 		class="h-full w-full flex-1 resize-none bg-zinc-950 px-4 py-3 font-mono text-[13px] leading-6 text-zinc-300 outline-none placeholder:text-zinc-600"

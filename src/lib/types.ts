@@ -39,6 +39,16 @@ export interface CompletionResponse {
 	model: string;
 }
 
+export interface Project {
+	id: string;
+	name: string;
+	notes: string;
+	draft: string;
+	/** ISO timestamps */
+	createdAt: string;
+	updatedAt: string;
+}
+
 export interface Settings {
 	/** Upstream OpenAI-compatible base URL, e.g. https://api.groq.com/openai/v1.
 	 *  Empty = use the server's configured default (llm.cs cluster endpoint). */
