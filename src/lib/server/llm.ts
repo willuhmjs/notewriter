@@ -3,12 +3,15 @@
  * OpenAI-compatible endpoint. The API key lives in server env (Kubernetes
  * secret), never shipped to the browser.
  *
- * Note: gpt-oss models emit reasoning tokens; a small max_tokens can be
- * consumed entirely by reasoning and yield null content. We budget for it and
- * retry once with a larger budget if the first attempt returns empty.
+ * Uses SSE streaming: on this provider glm-5.3-int4 only produces clean output
+ * with stream:true (non-streaming returns degenerate tokens), and streaming
+ * also lets us stop early once the completion is clearly done.
  */
 
-const SYSTEM_PROMPT = `You are an inline sentence completion engine. Complete the user's sentence in 5-15 words based STRICTLY on the provided notes. Do NOT introduce outside facts. If the notes do not support a completion, return an empty string. Return ONLY the raw completion string. No markdown, no quotes, no explanation. Do not think step by step; respond immediately with the completion only.`;
+// NOTE: keep this short. glm-5.3-int4 degenerates into number-salad with a longer
+// system prompt on this provider (verified empirically 2026-09-19); gpt-oss is
+// insensitive. All strictness constraints live in the user message instead.
+const SYSTEM_PROMPT = `Complete the user's unfinished sentence in 5-15 words based strictly on the provided notes. Return only the raw completion string.`;
 
 interface ProxyBody {
 	prefix: string;
@@ -58,7 +61,7 @@ export function buildMessages(
 		{ role: 'system', content: SYSTEM_PROMPT },
 		{
 			role: 'user',
-			content: `Notes:\n${formatNotes(notes)}\n\nSentence to complete: ${prefix}`
+			content: `Notes:\n${formatNotes(notes)}\n\nComplete this sentence using ONLY facts from the notes (5-15 words, no markdown, no quotes, no explanation). Do not introduce outside facts.\n\nSentence: ${prefix}`
 		}
 	];
 }
@@ -69,7 +72,10 @@ export const defaults = {
 	defaultModel: process.env.LLM_DEFAULT_MODEL ?? 'gpt-oss-120b'
 };
 
-/** Call the configured OpenAI-compatible chat completions endpoint. */
+/**
+ * Call the configured OpenAI-compatible chat completions endpoint via SSE
+ * streaming and accumulate the visible content deltas.
+ */
 export async function callLLM(
 	body: ProxyBody,
 	baseUrl: string,
@@ -80,49 +86,98 @@ export async function callLLM(
 	const messages = buildMessages(body.prefix, body.notes, body.task ?? 'complete');
 	const base = baseUrl.replace(/\/$/, '');
 
-	// First attempt with a modest budget; reasoning-heavy models can burn a
-	// small budget before emitting any visible content → retry with more room.
-	for (const maxTokens of [96, 768, 2048]) {
-		const res = await fetch(`${base}/chat/completions`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
-			},
-			body: JSON.stringify({
-				model,
-				messages,
-				max_tokens: maxTokens,
-				temperature: 0.2,
-				stream: false
-			})
-		});
-		if (!res.ok) {
-			throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 200)}`);
-		}
-		const data = (await res.json()) as {
-			choices?: { message?: { content?: string | null } }[];
-			model?: string;
-		};
-		const raw = data.choices?.[0]?.message?.content;
-		if (raw && raw.trim()) {
-			const text = sanitizeCompletion(raw, body.task ?? 'complete');
-			if (text) return { text, model: data.model ?? model };
-		}
-		// empty content — loop retries with the larger budget, then gives up
+	const res = await fetch(`${base}/chat/completions`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+		},
+		body: JSON.stringify({
+			model,
+			messages,
+			max_tokens: 512,
+			temperature: 0.2,
+			stream: true
+		})
+	});
+	if (!res.ok) {
+		throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 200)}`);
 	}
-	return { text: '', model };
+
+	let text = '';
+	let returnedModel = model;
+	const reader = res.body?.getReader();
+	if (reader) {
+		const decoder = new TextDecoder();
+		let buf = '';
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buf += decoder.decode(value, { stream: true });
+			// SSE events are separated by blank lines; each data line is JSON.
+			const lines = buf.split('\n');
+			buf = lines.pop() ?? '';
+			for (const line of lines) {
+				const trimmed = line.trim();
+				if (!trimmed.startsWith('data:')) continue;
+				const payload = trimmed.slice(5).trim();
+				if (payload === '[DONE]') continue;
+				try {
+					const evt = JSON.parse(payload) as {
+						model?: string;
+						choices?: { delta?: { content?: string | null }; finish_reason?: string | null }[];
+					};
+					if (evt.model) returnedModel = evt.model;
+					const delta = evt.choices?.[0]?.delta?.content;
+					if (delta) text += delta;
+					// We only want the first line of the completion.
+					if (evt.choices?.[0]?.finish_reason === 'stop') {
+						try {
+							await reader.cancel();
+						} catch {
+							/* stream already closed */
+						}
+						return { text: sanitizeCompletion(text, body.task ?? 'complete', body.prefix), model: returnedModel };
+					}
+				} catch {
+					/* partial JSON across chunks — wait for more */
+				}
+			}
+		}
+	}
+	return { text: sanitizeCompletion(text, body.task ?? 'complete', body.prefix), model: returnedModel };
 }
 
 /** Strip the ways models violate "raw string only": quotes, markdown, echo. */
-export function sanitizeCompletion(raw: string, task: 'complete' | 'expand'): string {
+export function sanitizeCompletion(raw: string, task: 'complete' | 'expand', prefix = ''): string {
 	let t = raw.trim();
 	if (task === 'expand') return t;
+	t = stripEcho(t, prefix);
 	// strip wrapping quotes
 	t = t.replace(/^["'«]|["'»]$/g, '').trim();
 	// strip markdown emphasis
 	t = t.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1');
-	// model echoed the prefix → keep only the tail
+	// first line only — a completion never spans paragraphs
 	const firstLine = t.split('\n')[0];
 	return firstLine.trim();
+}
+
+/**
+ * Models sometimes echo the tail of the prompt before completing. Ghost text
+ * is inserted at the cursor, so any echoed suffix of `prefix` would duplicate
+ * text in the editor — strip the longest matching overlap.
+ */
+function stripEcho(completion: string, prefix: string): string {
+	if (!prefix) return completion;
+	const c = completion.toLowerCase();
+	const p = prefix.trimEnd().toLowerCase();
+	// Try progressively shorter tails of the prompt as candidate echoes.
+	const max = Math.min(p.length, c.length);
+	for (let k = max; k >= 4; k--) {
+		const tail = p.slice(-k);
+		if (c.startsWith(tail)) {
+			return completion.slice(k).replace(/^[\s,;:]+/, '');
+		}
+	}
+	return completion;
 }
