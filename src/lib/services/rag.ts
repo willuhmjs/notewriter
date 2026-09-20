@@ -87,6 +87,22 @@ export function chunkNotes(text: string): NoteChunk[] {
 	return chunks;
 }
 
+/**
+ * Research docs often carry structural sections (headings, source lists, rubric
+ * tables, due dates) that tokenize like content and pollute retrieval. Filter
+ * chunks that look like metadata so BM25 only ranks real prose.
+ */
+export function isMetadataChunk(text: string): boolean {
+	const t = text.trim();
+	if (/^(#|\*\*|Course:|Due:|Rubric:|Prompt:|--$)/.test(t)) return true;
+	if (/Scholarly journal articles|Source list|^\|/.test(t)) return true;
+	// table-heavy (rubric maps)
+	if ((t.match(/\|/g) ?? []).length > 2) return true;
+	// reference-list lines (author, initial. (year).)
+	if (/^[A-Z][a-z]+, [A-Z]\. .*\(\d{4}\)\./m.test(t) && t.split('\n').length > 2) return true;
+	return false;
+}
+
 /** Term frequency map for a token list. */
 function termFreq(tokens: string[]): Map<string, number> {
 	const tf = new Map<string, number>();
@@ -117,6 +133,8 @@ export class NotesIndex {
 		this.avgLen = this.chunks.length ? total / this.chunks.length : 0;
 		// Embeddings are keyed by chunk content hash-ish (start offset); stale ones dropped.
 		this.embeddings.clear();
+		// Drop metadata-looking chunks from the searchable set.
+		this.chunks = this.chunks.filter((c) => !isMetadataChunk(c.text));
 		return this.chunks.length;
 	}
 

@@ -136,7 +136,7 @@
 
 	/** Editor → retrieval → LLM: the ghost-text brain. */
 	async function getSuggestion(query: string) {
-		const hits = notesIndex.search(query, 2);
+		const hits = notesIndex.search(query, 4);
 		if (hits.length === 0) return null;
 		try {
 			const res = await completeSentence({

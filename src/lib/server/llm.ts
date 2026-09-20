@@ -11,7 +11,9 @@
 // NOTE: keep this short. glm-5.3-int4 degenerates into number-salad with a longer
 // system prompt on this provider (verified empirically 2026-09-19); gpt-oss is
 // insensitive. All strictness constraints live in the user message instead.
-const SYSTEM_PROMPT = `Complete the user's unfinished sentence in 5-15 words based strictly on the provided notes. Return only the raw completion string.`;
+// NOTE: keep this short — glm-5.3-int4 degenerates with long system prompts on
+// this provider. Grounding rules live in the user message.
+const SYSTEM_PROMPT = `You are an inline autocomplete in a writing app. Continue the user's unfinished sentence as natural academic prose, grounded ONLY in the notes. Return ONLY the continuation — no repetition, no quotes, no commentary.`;
 
 interface ProxyBody {
 	prefix: string;
@@ -29,7 +31,7 @@ interface ChatMessage {
 
 /** Trim retrieved notes to a char budget so prompts stay small. */
 function formatNotes(notes: string[]): string {
-	const MAX_CHARS = 1500;
+	const MAX_CHARS = 2400;
 	let out = '';
 	for (const n of notes) {
 		const t = n.trim();
@@ -61,7 +63,7 @@ export function buildMessages(
 		{ role: 'system', content: SYSTEM_PROMPT },
 		{
 			role: 'user',
-			content: `Notes:\n${formatNotes(notes)}\n\nComplete this sentence using ONLY facts from the notes (5-15 words, no markdown, no quotes, no explanation). Do not introduce outside facts.\n\nSentence: ${prefix}`
+			content: `Relevant notes:\n${formatNotes(notes)}\n\nContinue this sentence so it reads as natural academic prose (5-20 words). Use ONLY facts from the notes — if the notes do not support a continuation, return an empty string. Match the sentence's tone and vocabulary.\n\nSentence: ${prefix}`
 		}
 	];
 }
