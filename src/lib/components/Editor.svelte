@@ -107,10 +107,10 @@
 
 		monaco.languages.registerInlineCompletionsProvider('*', {
 			async provideInlineCompletions(model, position) {
-				// Only complete at the very end of the document.
-				const lastLine = model.getLineCount();
-				if (position.lineNumber !== lastLine) return { items: [] };
-				if (position.column !== model.getLineMaxColumn(lastLine)) return { items: [] };
+				// Complete only at the end of the CURRENT LINE (mid-document is fine —
+				// e.g. typing above a References section), but not mid-word: there must
+				// be a word boundary (or line start) at the cursor.
+				if (position.column !== model.getLineMaxColumn(position.lineNumber)) return { items: [] };
 
 				// Debounce: wait out the typing pause inside the provider.
 				const wait = IDLE_MS() - (Date.now() - lastEditAt);
@@ -136,7 +136,7 @@
 					if (!res || !res.text || !editor) return { items: [] };
 					// Cursor must still be exactly where we sampled.
 					const pos = editor.getPosition();
-					if (!pos || pos.lineNumber !== lastLine || pos.column !== model.getLineMaxColumn(lastLine)) {
+					if (!pos || pos.column !== model.getLineMaxColumn(pos.lineNumber)) {
 						return { items: [] };
 					}
 					onStats({

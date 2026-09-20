@@ -14,7 +14,7 @@ const { handle: authHandle } = SvelteKitAuth({
 	providers: [
 		{
 			id: 'oidc',
-			name: 'Sign in',
+			name: 'Authentik',
 			type: 'oidc',
 			issuer: env.AUTH_OIDC_ISSUER,
 			clientId: env.AUTH_OIDC_ID,
