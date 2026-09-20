@@ -13,7 +13,13 @@
 // insensitive. All strictness constraints live in the user message instead.
 // NOTE: keep this short — glm-5.3-int4 degenerates with long system prompts on
 // this provider. Grounding rules live in the user message.
-const SYSTEM_PROMPT = `You are an inline autocomplete in a writing app. Continue the user's unfinished sentence as natural academic prose, grounded ONLY in the notes. Return ONLY the continuation — no repetition, no quotes, no commentary.`;
+const SYSTEM_PROMPT = `You are an inline autocomplete in a writing app. Continue the user's unfinished sentence so it reads as prose they would write, grounded ONLY in the notes.
+
+Rules:
+- Complete the sentence AT ITS CURRENT POINT — the continuation must fit the grammar of the unfinished phrase. Never pivot to a new clause or change the sentence's direction.
+- Continue as briefly as the sentence naturally needs — sometimes one or two words is the right completion.
+- If the notes do not support a natural continuation of THIS phrase, return an empty string.
+- Return ONLY the continuation. Never wrap output in quotes. Never repeat words from the sentence.`;
 
 interface ProxyBody {
 	prefix: string;
@@ -59,13 +65,19 @@ export function buildMessages(
 			}
 		];
 	}
-	return [
+	const messages: ChatMessage[] = [
 		{ role: 'system', content: SYSTEM_PROMPT },
 		{
 			role: 'user',
-			content: `Relevant notes:\n${formatNotes(notes)}\n\nContinue this sentence so it reads as natural academic prose (5-20 words). Use ONLY facts from the notes — if the notes do not support a continuation, return an empty string. Match the sentence's tone and vocabulary.\n\nSentence: ${prefix}`
+			content: `Relevant notes:\n${formatNotes(notes)}\n\nContinue this sentence (example: for "The worm spread via" the answer is "infected USB flash drives across air-gapped networks"):\n\n${prefix}`
 		}
 	];
+	// Seed an assistant turn with the prefix's final word so the model continues
+	// IN FORMAT (raw continuation) instead of echoing/quote-wrapping. Empirically
+	// this is the difference between "covered." and a pivoted new clause.
+	const lastWord = prefix.trim().split(/\s+/).pop() ?? '';
+	if (lastWord) messages.push({ role: 'assistant', content: lastWord });
+	return messages;
 }
 
 export const defaults = {
@@ -158,6 +170,8 @@ export async function callLLM(
 export function sanitizeCompletion(raw: string, task: 'complete' | 'expand', prefix = ''): string {
 	let t = raw.trim();
 	if (task === 'expand') return t;
+	// gpt-oss sometimes opens with a stray empty quote pair; drop it.
+	t = t.replace(/^""/, '').trim();
 	t = stripEcho(t, prefix);
 	// strip wrapping quotes
 	t = t.replace(/^["'«]|["'»]$/g, '').trim();
