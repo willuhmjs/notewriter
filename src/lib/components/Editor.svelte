@@ -9,9 +9,8 @@
 	 * The provider fires at the end of the current line after a typing pause,
 	 * asks the parent for a notes-grounded suggestion, and Monaco renders it as
 	 * ghost text. Tab accepts (Monaco built-in), Escape dismisses (built-in).
-	 * If the user keeps typing while a suggestion is in flight, the result is
-	 * re-suggested once typing settles (Monaco re-queries automatically on
-	 * cursor-position changes, and we cache one in-flight result to reuse).
+	 * Suggestions are sentence-scoped: each pause completes the current
+	 * unfinished sentence only, and is discarded the moment the cursor moves.
 	 */
 
 	let {
@@ -23,8 +22,12 @@
 	}: {
 		draft: string;
 		settings: Settings;
-		/** Parent-provided: retrieval + LLM call. Returns null for "no suggestion". */
-		getSuggestion: (query: string) => Promise<{ text: string; latencyMs: number; model: string } | null>;
+		/** Parent-provided: retrieval + LLM call. retrievalQuery feeds BM25 (broader
+		 *  context); prefix is the exact unfinished sentence the LLM continues. */
+		getSuggestion: (
+			retrievalQuery: string,
+			prefix: string
+		) => Promise<{ text: string; latencyMs: number; model: string } | null>;
 		onDraftChange: (d: string) => void;
 		onStats: (s: { words: number; chars: number; latencyMs: number; model: string | null; thinking: boolean }) => void;
 	} = $props();
@@ -34,9 +37,6 @@
 	/** Last user edit timestamp — used to debounce the provider. */
 	let lastEditAt = 0;
 	let inflight = false;
-	/** Re-offer window: if the user typed during a request, offer the (possibly
-	 *  still-useful) result on the next provider query instead of re-fetching. */
-	let pending: { query: string; res: { text: string; latencyMs: number; model: string } } | null = null;
 
 	const IDLE_MS = () => settings.idleDelayMs || 400;
 
@@ -131,37 +131,27 @@
 					endColumn: position.column
 				});
 				const para = text.split(/\n\s*\n/).pop() ?? text;
-				const query = para.length > 300 ? para.slice(-300) : para;
-				if (query.trim().length < 10) return { items: [] };
+				// Retrieval query: paragraph tail — more keywords for BM25.
+				const retrievalQuery = para.length > 300 ? para.slice(-300) : para;
+				// Continuation point: ONLY the current unfinished sentence, so
+				// suggestions track the cursor instead of re-completing the
+				// same paragraph tail on every pause.
+				const sentence = para.split(/(?<=[.!?])\s+/).pop() ?? para;
+				const prefix = sentence.length > 200 ? sentence.slice(-200) : sentence;
+				if (prefix.trim().length < 10) return { items: [] };
 				if (inflight) return { items: [] };
-
-				// A recent suggestion for nearly the same query still applies —
-				// serve it instantly instead of another round-trip.
-				if (pending && query.startsWith(pending.query.slice(0, Math.max(0, pending.query.length - 60)))) {
-					const res = pending.res;
-					pending = null;
-					pending = { query, res };
-					onStats({
-						words: wordCount(model.getValue()),
-						chars: model.getValue().length,
-						latencyMs: res.latencyMs,
-						model: res.model,
-						thinking: false
-					});
-					return { items: [{ insertText: res.text }] };
-				}
 
 				inflight = true;
 				onStats({ words: wordCount(model.getValue()), chars: model.getValue().length, latencyMs: 0, model: null, thinking: true });
 				try {
-					const res = await getSuggestion(query);
+					const res = await getSuggestion(retrievalQuery, prefix);
 					if (!res || !res.text || !editor) return { items: [] };
-					// Cursor must still be exactly where we sampled.
+					// Cursor must still be exactly where we sampled — otherwise
+					// the user typed on and this suggestion is stale.
 					const pos = editor.getPosition();
-					if (!pos || pos.column !== model.getLineMaxColumn(pos.lineNumber)) {
+					if (!pos || pos.lineNumber !== position.lineNumber || pos.column !== position.column) {
 						return { items: [] };
 					}
-					pending = { query, res };
 					onStats({
 						words: wordCount(model.getValue()),
 						chars: model.getValue().length,

@@ -135,12 +135,12 @@
 	}
 
 	/** Editor → retrieval → LLM: the ghost-text brain. */
-	async function getSuggestion(query: string) {
-		const hits = notesIndex.search(query, 4);
+	async function getSuggestion(retrievalQuery: string, prefix: string) {
+		const hits = notesIndex.search(retrievalQuery, 4);
 		if (hits.length === 0) return null;
 		try {
 			const res = await completeSentence({
-				prefix: query,
+				prefix,
 				notes: hits.map((h) => h.chunk.text),
 				maxTokens: 48,
 				model: settings.model,
