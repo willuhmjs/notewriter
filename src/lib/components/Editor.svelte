@@ -6,9 +6,12 @@
 	/**
 	 * Drafting editor: self-hosted Monaco with a native inlineCompletionsProvider.
 	 *
-	 * The provider only fires at the very end of the document after a typing pause,
+	 * The provider fires at the end of the current line after a typing pause,
 	 * asks the parent for a notes-grounded suggestion, and Monaco renders it as
-	 * ghost text. Tab accepts (Monaco built-in), Escape/typing dismisses (built-in).
+	 * ghost text. Tab accepts (Monaco built-in), Escape dismisses (built-in).
+	 * If the user keeps typing while a suggestion is in flight, the result is
+	 * re-suggested once typing settles (Monaco re-queries automatically on
+	 * cursor-position changes, and we cache one in-flight result to reuse).
 	 */
 
 	let {
@@ -31,6 +34,9 @@
 	/** Last user edit timestamp — used to debounce the provider. */
 	let lastEditAt = 0;
 	let inflight = false;
+	/** Re-offer window: if the user typed during a request, offer the (possibly
+	 *  still-useful) result on the next provider query instead of re-fetching. */
+	let pending: { query: string; res: { text: string; latencyMs: number; model: string } } | null = null;
 
 	const IDLE_MS = () => settings.idleDelayMs || 400;
 
@@ -129,6 +135,22 @@
 				if (query.trim().length < 10) return { items: [] };
 				if (inflight) return { items: [] };
 
+				// A recent suggestion for nearly the same query still applies —
+				// serve it instantly instead of another round-trip.
+				if (pending && query.startsWith(pending.query.slice(0, Math.max(0, pending.query.length - 60)))) {
+					const res = pending.res;
+					pending = null;
+					pending = { query, res };
+					onStats({
+						words: wordCount(model.getValue()),
+						chars: model.getValue().length,
+						latencyMs: res.latencyMs,
+						model: res.model,
+						thinking: false
+					});
+					return { items: [{ insertText: res.text }] };
+				}
+
 				inflight = true;
 				onStats({ words: wordCount(model.getValue()), chars: model.getValue().length, latencyMs: 0, model: null, thinking: true });
 				try {
@@ -139,6 +161,7 @@
 					if (!pos || pos.column !== model.getLineMaxColumn(pos.lineNumber)) {
 						return { items: [] };
 					}
+					pending = { query, res };
 					onStats({
 						words: wordCount(model.getValue()),
 						chars: model.getValue().length,

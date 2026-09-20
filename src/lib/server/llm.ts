@@ -95,9 +95,13 @@ export async function callLLM(
 		body: JSON.stringify({
 			model,
 			messages,
-			max_tokens: 512,
+			max_tokens: 320,
 			temperature: 0.2,
-			stream: true
+			stream: true,
+			// gpt-oss models spend most of their latency on reasoning tokens;
+			// low effort halves round-trip with no quality loss on 5-15 word
+			// completions. Ignored by models that don't support it.
+			reasoning_effort: 'low'
 		})
 	});
 	if (!res.ok) {
